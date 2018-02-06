@@ -1,0 +1,330 @@
+---
+title: "Introduction to Caret"
+author: "Michael Battaglia"
+date: "January 30, 2018"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+library(knitr)
+library(tidyverse)
+library(caret)
+library(elasticnet)
+set.seed(7)
+
+```
+
+## Introduction
+
+`caret` provides a common interface for several algorithms. The syntax is intuitive and it makes many machine learning tasks easier.
+
+- Easy to set up cross-validation
+- Automated pre-processing for each cv-split
+    - Prevents data snooping
+- Try several model types with minimal code changes
+- Functions for calculating performance metrics
+
+## Setup
+
+I'll continue to use the song dataset, which I also used for the python pedagogy.
+
+```{r}
+
+songs <- read_csv("YearPredictionMSD.txt", col_names = FALSE)
+names(songs) <- c("Year", paste0("X", 1:90))
+
+train <- songs %>%
+  sample_n(5000)
+
+test <- songs %>%
+  setdiff(train)
+
+X_train <- train %>%
+  select(-Year)
+
+y_train <- train %>%
+  pull(Year)
+
+X_test <- test %>%
+  select(-Year)
+
+y_test <- test %>%
+  pull(Year)
+
+```
+
+`caret` by default will tune parameters in parallel, if a parallel backend is registered.
+
+```{r, results = "hide", warning = FALSE, message = FALSE}
+
+options(mc.cores = 6)
+
+library(doFuture)
+registerDoFuture()
+plan(multiprocess)
+
+```
+
+## Simple Regression
+
+The `train` function is the highest-level `caret` function. It can handle both simple and complex modeling procedures without much of a change in syntax.
+
+The main parameters:  
+`trControl`: output of `trainControl` function, cross-validation specification  
+`tuneGrid`: grid of parameters to try (optional)  
+`tuneLength`: if using random search, the maximum to try for each parameter  
+`preProcess`: applies data pre-processing to each fold appropriately  
+      - standardizing  
+      - pca  
+      - imputation  
+`method`: algorithm to use
+
+Here is the most basic example.
+
+```{r}
+
+lm_fit <- train(X_train, y_train,
+                method = "lm")
+
+```
+
+Let's say we want to standardize our predictors prior to modeling. The `preProcess` argument has a multitude of options for transforming the features.
+
+```{r}
+
+lm_fit <- train(X_train, y_train,
+                preProcess = c("center", "scale"),
+                method = "lm")
+
+```
+
+## Lasso
+
+```{r}
+
+lasso_fit <- train(X_train, y_train,
+                preProcess = c("center", "scale"),
+                method = "lasso")
+
+```
+
+The lasso has a tuning parameter `s`/`fraction`, but we didn't specify anything. What did `caret` do?
+
+```{r}
+
+lasso_fit
+
+predict(lasso_fit$finalModel, type = "coefficients", 
+        s = lasso_fit$bestTune$fraction, 
+        mode = "fraction")
+
+```
+
+The random search provides us with a starting point. We should further examine values of `s` near `0.5`. To do this we can create our own grid of parameters for `caret` to search over.
+
+The procedure for specifying and parameter-tuning is straightforward. 
+
+First we specify the cross-validation procedure using `trainControl`. 
+
+```{r}
+
+fitControl <- trainControl(method = "cv",
+                           number = 5,
+                           allowParallel = TRUE)
+
+```
+
+We use the `expand.grid` function to specify the parameters to search over.
+
+```{r}
+lasso_grid <- expand.grid(
+  fraction = 3:8 * 0.1
+)
+
+```
+
+Then pass these objects into the `train` function.
+
+```{r}
+
+lasso_fit <- train(X_train, y_train,
+                preProcess = c("center", "scale"),
+                method = "lasso",
+                trControl = fitControl,
+                tuneGrid = lasso_grid
+                )
+
+```
+
+Printing the object provides an excellent summary of results.
+
+```{r}
+
+lasso_fit
+
+```
+
+And plotting the object produces a nice visualization of the grid search. (can use ggplot!)
+
+```{r}
+
+ggplot(lasso_fit)
+
+```
+
+## Random Forest
+
+We will start with a random forest, using `ranger`.
+
+The parameters to tune are `mtry`, `splitrule`, and `min.node.size`. 
+
+We will use `expand.grid` to create a grid of model-parameters to try. In this case we only tune `mtry`.
+
+```{r}
+
+rf_grid <- expand.grid(
+    mtry = 5:10*5,
+    splitrule = "variance",
+    min.node.size = 5
+  )
+
+```
+
+Now we use the `train` function to fit our random forest. 
+
+
+```{r, cache = TRUE, message = FALSE, warning = FALSE, results = "hide"}
+
+rf_fit <- train(X_train, y_train, 
+                trControl = fitControl, 
+                tuneGrid = rf_grid, 
+                preProcess = c("center", "scale"), 
+                method = "ranger", 
+                num.trees = 2000,
+                num.threads = 1)
+
+```
+
+We can examine the fit output to explore the best combination of parameters.
+
+```{r}
+
+rf_fit
+
+```
+
+```{r}
+
+ggplot(rf_fit)
+
+```
+
+## GBM
+
+Now let us train a gbm using the `gbm` package.
+
+Parameters to tune are `n.trees`, `interaction.depth`, `shrinkage`, and `n.minobsinnode`.
+
+`shrinkage` and `n.minobinnode` are fixed at reasonable values, while we tune `n.trees` and `interaction.depth`.
+
+```{r}
+
+gbm_grid <- expand.grid(
+    n.trees = 1:4 * 100,
+    interaction.depth = 3:9 * 2,
+    shrinkage = 0.05,
+    n.minobsinnode = 10
+  )
+
+```
+
+Now train tune the gbm using `train`.
+
+```{r, cache = TRUE, results = "hide", warning = FALSE, message = FALSE}
+
+gbm_fit <- train(X_train, y_train, 
+                trControl = fitControl, 
+                tuneGrid = gbm_grid, 
+                preProcess = c("center", "scale"), 
+                method = "gbm", 
+                distribution = "gaussian")
+
+```
+
+```{r}
+
+gbm_fit
+
+```
+
+```{r}
+
+ggplot(gbm_fit)
+
+```
+
+## Model comparison
+
+```{r}
+
+y_rf <- predict(rf_fit, X_test)
+y_gbm <- predict(gbm_fit, X_test)
+y_lm <- predict(lm_fit, X_test)
+y_lasso <- predict(lasso_fit, X_test)
+
+list(y_lm, y_lasso, y_rf, y_gbm) %>%
+  map(~ postResample(., y_test)) %>%
+  map(as.list) %>%
+  bind_rows() %>%
+  mutate(model = c("Linear Regression", "Lasso", "RF", "GBM")) %>%
+  select(model, RMSE:MAE) %>%
+  kable()
+
+```
+
+## Adaptive Resampling
+
+Another potentially useful tuning method is adaptive resampling.
+
+Tuning is generally an iterative process. Cast a wide net at the beginning and use those results to guide where to focus.
+
+`caret` attempts to do the iterative process for you with adaptive resampling.
+
+When specifying `method = "adaptive_cv"`, `caret` will use information from the past parameter results to choose what parameters to try next.
+
+```{r}
+
+adaptiveFitControl <- trainControl(method = "adaptive_cv",
+                                   search = "random",
+                                   adaptive = list(min = 4, alpha = .05,
+                                                   methods = "gls", 
+                                                   complete = TRUE),
+                                   number = 5,
+                                   allowParallel = TRUE)
+
+```
+
+I hate tuning gbms, so let's see how close `caret` gets to the manual grid specification.
+
+```{r, cache = TRUE, warning = FALSE, message = FALSE}
+
+adaptive_gbm_fit <- train(X_train, y_train, 
+                trControl = adaptiveFitControl,
+                preProcess = c("center", "scale"), 
+                method = "gbm", 
+                distribution = "gaussian",
+                tuneLength = 10)
+```
+
+```{r}
+adaptive_gbm_fit
+
+adaptive_gbm_fit$results %>%
+  arrange(RMSE) %>%
+  head() %>%
+  kable()
+
+```
